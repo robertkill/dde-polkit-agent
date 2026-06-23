@@ -11,9 +11,12 @@
 #include <QUrl>
 #include <QAbstractButton>
 #include <QButtonGroup>
+#include <QLabel>
+#include <QTextOption>
 
 #include <DIcon>
 #include <DGuiApplicationHelper>
+#include <DToolTip>
 
 #include <libintl.h>
 #include <dde-shell/dlayershellwindow.h>
@@ -21,9 +24,11 @@
 DWIDGET_USE_NAMESPACE
 
 AuthDialog::AuthDialog(const QString &message,
-                       const QString &iconName)
+                       const QString &iconName,
+                       const QString &toolTipMessage)
     : DDialog(message, QString(), nullptr)
     , m_message(message)
+    , m_toolTipMessage(toolTipMessage)
     , m_iconName(iconName)
     , m_adminsCombo(new QComboBox(this))
     , m_passwordInput(new DPasswordEdit(this))
@@ -317,6 +322,18 @@ void AuthDialog::initUI()
 
     setMinimumWidth(380);
     setOnButtonClickedClose(false);
+
+    if (auto titleLabel = findChild<QLabel *>("TitleLabel")) {
+        titleLabel->setAttribute(Qt::WA_TransparentForMouseEvents, false);
+        if (!m_toolTipMessage.isEmpty()) {
+            QTextOption option;
+            option.setWrapMode(QTextOption::WrapAnywhere);
+            option.setAlignment(titleLabel->alignment());
+            option.setTextDirection(titleLabel->layoutDirection() == Qt::RightToLeft ? Qt::RightToLeft : Qt::LeftToRight);
+            titleLabel->setToolTip(DToolTip::wrapToolTipText(m_toolTipMessage, option));
+            DToolTip::setToolTipShowMode(titleLabel, DToolTip::AlwaysShow);
+        }
+    }
 
     // 设置图标
     QPixmap icon;
