@@ -41,7 +41,8 @@ public:
     };
 
     AuthDialog(const QString &message,
-               const QString &iconName);
+               const QString &iconName,
+               const QString &toolTipMessage = QString());
     ~AuthDialog();
 
     void setError(const QString &error, bool alertImmediately = false);
@@ -79,6 +80,7 @@ private slots:
 private:
     QString m_appname;
     QString m_message;
+    QString m_toolTipMessage;
     QString m_iconName;
 
     QComboBox *m_adminsCombo;

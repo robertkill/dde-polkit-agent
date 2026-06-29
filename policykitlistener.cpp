@@ -4,9 +4,14 @@
 
 #include <QDBusConnection>
 #include <QDebug>
+#include <QFile>
+#include <QFileInfo>
 #include <QtConcurrent>
 #include <QJsonDocument>
 #include <QJsonArray>
+#include <QDir>
+#include <QRegularExpression>
+#include <QStringList>
 
 #include <polkit-qt6-1/PolkitQt1/Agent/Listener>
 
@@ -18,6 +23,147 @@
 #ifdef USE_DEEPIN_POLKIT
 static bool isAccountLocked(const PolkitQt1::Identity &identity);
 #endif
+
+static bool hasElideMarker(const QString &text)
+{
+    return text.contains(QStringLiteral("...")) || text.contains(QChar(0x2026));
+}
+
+static QStringList commandArgumentsForPid(const QString &pid)
+{
+    if (pid.isEmpty()) {
+        return {};
+    }
+
+    QFile cmdlineFile(QStringLiteral("/proc/%1/cmdline").arg(pid));
+    if (!cmdlineFile.open(QIODevice::ReadOnly)) {
+        return {};
+    }
+
+    QStringList args;
+    const QList<QByteArray> rawArgs = cmdlineFile.readAll().split('\0');
+    for (const QByteArray &rawArg : rawArgs) {
+        if (!rawArg.isEmpty()) {
+            args << QString::fromLocal8Bit(rawArg);
+        }
+    }
+
+    return args;
+}
+
+static QString processCwdForPid(const QString &pid)
+{
+    return pid.isEmpty() ? QString() : QFileInfo(QStringLiteral("/proc/%1/cwd").arg(pid)).symLinkTarget();
+}
+
+static QString quotedCommandFromMessage(const QString &message)
+{
+    const qsizetype start = message.indexOf(QLatin1Char('"'));
+    const qsizetype end = message.lastIndexOf(QLatin1Char('"'));
+    if (start < 0 || end <= start) {
+        return QString();
+    }
+
+    return message.mid(start + 1, end - start - 1);
+}
+
+static QString quoteCommandArgument(QString arg)
+{
+    if (!arg.contains(QRegularExpression(QStringLiteral("\\s|[\\\"]")))) {
+        return arg;
+    }
+
+    arg.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
+    arg.replace(QLatin1Char('"'), QStringLiteral("\\\""));
+    return QStringLiteral("\"%1\"").arg(arg);
+}
+
+static QString fullCommandFromProcess(const QString &message, const PolkitQt1::Details &details)
+{
+    QStringList args = commandArgumentsForPid(details.lookup(QStringLiteral("polkit.caller-pid")));
+    if (args.isEmpty()) {
+        return QString();
+    }
+
+    if (QFileInfo(args.constFirst()).fileName() == QStringLiteral("pkexec")) {
+        args.removeFirst();
+    }
+    if (args.isEmpty()) {
+        return QString();
+    }
+
+    const QString elidedCommand = quotedCommandFromMessage(message);
+    const QString messageProgram = elidedCommand.section(QLatin1Char(' '), 0, 0);
+    if (messageProgram.isEmpty()) {
+        return QString();
+    }
+
+    if (QFileInfo(messageProgram).fileName() != QFileInfo(args.constFirst()).fileName()) {
+        return QString();
+    }
+
+    args[0] = messageProgram;
+
+    QString cwd = processCwdForPid(details.lookup(QStringLiteral("polkit.caller-pid")));
+    if (cwd.isEmpty()) {
+        cwd = processCwdForPid(details.lookup(QStringLiteral("polkit.subject-pid")));
+    }
+
+    for (int i = 1; i < args.size(); ++i) {
+        if (!cwd.isEmpty()
+                && QFileInfo(args.at(i)).isRelative()
+                && (args.at(i).contains(QLatin1Char('/')) || args.at(i).endsWith(QStringLiteral(".deb")))) {
+            args[i] = QDir(cwd).absoluteFilePath(args.at(i));
+        }
+    }
+
+    for (QString &arg : args) {
+        arg = quoteCommandArgument(arg);
+    }
+
+    return args.join(QLatin1Char(' '));
+}
+
+static QStringList processContextForPid(const QString &pid)
+{
+    QStringList lines;
+    QStringList args = commandArgumentsForPid(pid);
+    if (!args.isEmpty()) {
+        for (QString &arg : args) {
+            arg = quoteCommandArgument(arg);
+        }
+        lines << args.join(QLatin1Char(' '));
+    }
+
+    const QString cwd = processCwdForPid(pid);
+    if (!cwd.isEmpty()) {
+        lines << cwd;
+    }
+
+    return lines;
+}
+
+static QString authenticationToolTipText(const QString &message, const PolkitQt1::Details &details)
+{
+    if (!hasElideMarker(message)) {
+        return QString();
+    }
+
+    const QString fullCommand = fullCommandFromProcess(message, details);
+    const qsizetype start = message.indexOf(QLatin1Char('"'));
+    const qsizetype end = message.lastIndexOf(QLatin1Char('"'));
+    if (!fullCommand.isEmpty() && start >= 0 && end > start) {
+        QString toolTipText = message;
+        toolTipText.replace(start + 1, end - start - 1, fullCommand);
+        return toolTipText;
+    }
+
+    QStringList lines{ message };
+    lines << processContextForPid(details.lookup(QStringLiteral("polkit.caller-pid")));
+    lines << processContextForPid(details.lookup(QStringLiteral("polkit.subject-pid")));
+    lines.removeDuplicates();
+    return lines.join(QLatin1Char('\n'));
+}
 
 PolicyKitListener::PolicyKitListener(QObject *parent)
     : Listener(parent)
@@ -86,7 +232,7 @@ void PolicyKitListener::initiateAuthentication(const QString &actionId,
 
     m_pluginManager.data()->setActionID(actionId);
 
-    m_dialog = new AuthDialog(message, iconName);
+    m_dialog = new AuthDialog(message, iconName, authenticationToolTipText(message, details));
     m_dialog->setAttribute(Qt::WA_DeleteOnClose);
     initDialog(actionId);
 }
